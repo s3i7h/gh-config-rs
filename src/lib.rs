@@ -30,6 +30,7 @@ mod keyring;
 use std::collections::HashMap;
 use std::env::var;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use dirs::home_dir;
 use serde::{Deserialize, Serialize};
@@ -47,6 +48,10 @@ const HOSTS_FILE_NAME: &str = "hosts.yml";
 /// Hostname of github.com.
 pub const GITHUB_COM: &str = "github.com";
 
+pub const GITHUB_TOKEN_ENVS: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
+pub const GITHUB_ENTERPRISE_TOKEN_ENVS: [&str; 2] =
+    ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
+
 /// An error occurred in this crate.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -61,6 +66,15 @@ pub enum Error {
 
     #[error("Config file not found.")]
     ConfigNotFound,
+
+    #[error("Cli error: {0}")]
+    CliError(#[from] CliError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CliError {
+    #[error("Error decoding output: {0}")]
+    DecodeError(#[from] std::str::Utf8Error),
 }
 
 /// What protocol to use when performing git operations.
@@ -172,15 +186,44 @@ impl Hosts {
     /// Retrieves a token from the secure storage or insecure storage.
     /// User interaction may be required to unlock the keychain, depending on the OS.
     /// If any token found for the hostname, returns None.
-    #[allow(deprecated)]
     pub fn retrieve_token(&self, hostname: &str) -> Result<Option<String>, Error> {
-        Ok(self.retrieve_token_secure(hostname)?.or_else(|| {
-            self.get(hostname)
-                .and_then(|h| match h.oauth_token.is_empty() {
-                    true => None,
-                    _ => Some(h.oauth_token.to_owned()),
-                })
-        }))
+        let empty_to_none = |s: String| match s.is_empty() {
+            true => None,
+            _ => Some(s),
+        };
+
+        let retrieve_fns = [
+            |s: &Self, h| s.retrieve_token_from_env(h),
+            |s: &Self, h| s.retrieve_token_from_config(h),
+            |s: &Self, h| s.retrieve_token_secure(h),
+            |s: &Self, h| s.retrieve_token_from_cli(h),
+        ];
+
+        Ok(retrieve_fns
+            .iter()
+            .map(|f| f(self, hostname).unwrap_or_default())
+            .find_map(|s| s.and_then(empty_to_none)))
+    }
+
+    /// Retrieves token from envs
+    /// If no tokens are found for the hostname, returns None
+    fn retrieve_token_from_env(&self, hostname: &str) -> Result<Option<String>, Error> {
+        Ok(match hostname {
+            GITHUB_COM => GITHUB_TOKEN_ENVS
+                .iter()
+                .map(var)
+                .find_map(|value| value.ok()),
+            _ => GITHUB_ENTERPRISE_TOKEN_ENVS
+                .iter()
+                .map(var)
+                .find_map(|value| value.ok()),
+        })
+    }
+
+    /// Retrieves token from the config file if available.
+    /// If no tokens are found for the hostname, returns None
+    fn retrieve_token_from_config(&self, hostname: &str) -> Result<Option<String>, Error> {
+        Ok(self.get(hostname).map(|h| h.oauth_token.to_owned()))
     }
 
     /// Retrieves a token from the secure storage only.
@@ -190,6 +233,27 @@ impl Hosts {
         Ok(Keyring
             .get(hostname)?
             .map(|t| String::from_utf8(t).unwrap()))
+    }
+
+    /// Retrieves token from the cli as a last-resort
+    /// If no tokens are found for the hostname, returns None
+    fn retrieve_token_from_cli(&self, hostname: &str) -> Result<Option<String>, Error> {
+        let child = std::process::Command::new("gh")
+            .args(["auth", "token"])
+            .args(["--hostname", hostname])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let output = child.wait_with_output()?;
+        let token = std::str::from_utf8(&output.stdout)
+            .map_err(|e| Error::CliError(CliError::DecodeError(e)))?;
+        Ok(match token {
+            "" => None,
+            s => match s.strip_suffix(['\r', '\n']) {
+                Some(stripped) => Some(stripped.to_string()),
+                None => Some(s.to_string()),
+            },
+        })
     }
 }
 

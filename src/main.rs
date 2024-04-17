@@ -88,17 +88,17 @@ fn run() -> Result<(), anyhow::Error> {
 
             match action {
                 AuthnAction::List => output!(args, &hosts)?,
-                AuthnAction::Get { host, token_only } => match hosts.get(&host) {
-                    Some(h) => match token_only {
-                        true => match hosts.retrieve_token(&host)? {
-                            Some(t) => print!("{}", t),
-                            _ => return Err(anyhow!("Token was not found for the host.")),
-                        },
-                        _ => output!(args, &h)?,
+                AuthnAction::Get { host, token_only } => match token_only {
+                    true => match hosts.retrieve_token(&host)? {
+                        Some(t) => print!("{}", t),
+                        _ => return Err(anyhow!("Token was not found for the host.")),
                     },
-                    _ => Err(anyhow!(
-                        "The specified host not found in the configuration."
-                    ))?,
+                    _ => match hosts.get(&host) {
+                        Some(h) => output!(args, &h)?,
+                        _ => Err(anyhow!(
+                            "The specified host not found in the configuration."
+                        ))?,
+                    },
                 },
             }
         }
