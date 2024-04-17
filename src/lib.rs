@@ -192,16 +192,16 @@ impl Hosts {
             _ => Some(s),
         };
 
-        let retrieve_fns = [
-            |s: &Self, h| s.retrieve_token_from_env(h),
-            |s: &Self, h| s.retrieve_token_from_config(h),
-            |s: &Self, h| s.retrieve_token_secure(h),
-            |s: &Self, h| s.retrieve_token_from_cli(h),
+        let retrieve_methods = [
+            Self::retrieve_token_from_env,
+            Self::retrieve_token_from_config,
+            Self::retrieve_token_secure,
+            Self::retrieve_token_from_cli,
         ];
 
-        Ok(retrieve_fns
+        Ok(retrieve_methods
             .iter()
-            .map(|f| f(self, hostname).unwrap_or_default())
+            .map(|method| method(self, hostname).unwrap_or_default())
             .find_map(|s| s.and_then(empty_to_none)))
     }
 
